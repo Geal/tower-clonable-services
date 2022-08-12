@@ -1,4 +1,9 @@
-use futures::future::BoxFuture;
+use std::{marker::PhantomData, pin::Pin};
+
+use futures::{
+    future::{BoxFuture, Either},
+    Future,
+};
 use tower::{BoxError, Service, ServiceExt};
 
 #[tokio::main]
@@ -7,7 +12,9 @@ async fn main() -> Result<(), BoxError> {
         inner: B {
             data: "hello".to_string(),
             counter: 0,
+            phantom: PhantomData,
         },
+        phantom: PhantomData,
     };
 
     let req = Request { condition: false };
@@ -36,47 +43,50 @@ struct Response {
     value: String,
 }
 
-struct A {
-    inner: B,
+struct A<'a, 'b> {
+    inner: B<'b>,
+    phantom: PhantomData<&'a [u8]>,
 }
 
-#[derive(Clone)]
-struct B {
+struct B<'b> {
     data: String,
     counter: usize,
+    phantom: PhantomData<&'b [u8]>,
 }
 
-impl Service<Request> for A {
+impl<'a, 'b> Service<Request> for A<'a, 'b> {
     type Response = Response;
     type Error = BoxError;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + 'a>>;
+    //type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        // using the inner service depends on the condition here, so
+        // using the inner service depends on the condition here, but
+        // we will ignore the hairy cases here for now
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        let mut service = self.inner.clone();
-        Box::pin(async move {
-            if req.condition {
+        let res = if req.condition {
+            Either::Left(async {
                 Ok(Response {
                     value: "A".to_string(),
                 })
-            } else {
-                service.call(req).await
-            }
-        })
+            })
+        } else {
+            Either::Right(self.inner.call(req))
+        };
+        Box::pin(res)
     }
 }
 
-impl Service<Request> for B {
+impl<'b> Service<Request> for B<'b> {
     type Response = Response;
     type Error = BoxError;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
     fn poll_ready(
         &mut self,
